@@ -1,4 +1,4 @@
-project_name: ot-rcp
+project_name: openthread_rcp
 label: OpenThread - RCP
 package: openthread
 description:   >
