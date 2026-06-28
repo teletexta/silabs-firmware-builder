@@ -1,131 +1,84 @@
-name: Build firmwares
+name: Build ZBDongle-E OpenThread RCP
 
 on:
   workflow_dispatch:
-
-  release:
-    types:
-      - published
 
 env:
   REGISTRY: ghcr.io
 
 jobs:
-  run-pre-commit:
-    name: Run pre-commit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-      - name: Install pre-commit
-        run: |
-          pip install pre-commit
-          pre-commit install
-      - name: Run pre-commit
-        run: |
-          pre-commit run --show-diff-on-failure --color=always --all-files
-
   build-container:
     name: Create build container image
     runs-on: ubuntu-latest
     permissions:
       packages: write
+
+    outputs:
+      container_name: ${{ steps.read-repo-info.outputs.container_name }}
+
     steps:
       - uses: actions/checkout@v4
-      - name: Log in to the GitHub container registry
+
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Read repository information
         id: read-repo-info
+        shell: bash
         run: |
-          if [[ $GITHUB_EVENT_NAME == "pull_request" ]]; then
-            base_image=$(echo ${{ github.event.pull_request.base.repo.full_name }} | awk '{print tolower($0)}')
-            head_image=$(echo ${{ github.event.pull_request.head.repo.full_name }} | awk '{print tolower($0)}')
-          else
-            base_image=$(echo ${{ github.repository }} | awk '{print tolower($0)}')
-            head_image=$(echo ${{ github.repository }} | awk '{print tolower($0)}')
-          fi
-
+          image_name=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           tag_name=$(echo "${{ hashFiles('Dockerfile') }}" | cut -c-16)
 
-          # Default to building a new container under the original repo
-          image_name=$head_image
-          build_image=true
-
-          # Check if we can use the base image (Nabu Casa)
-          if docker manifest inspect ${{ env.REGISTRY }}/$base_image:$tag_name; then
-            image_name=$base_image
+          if docker manifest inspect ${{ env.REGISTRY }}/$image_name:$tag_name >/dev/null 2>&1; then
             build_image=false
-          fi
-
-          # Check if we can use the head image (if this is a PR)
-          if [[ $base_image != $head_image ]]; then
-            if docker manifest inspect ${{ env.REGISTRY }}/$head_image:$tag_name; then
-              image_name=$head_image
-              build_image=false
-            fi
-          fi
-
-          if [[ $build_image == "true" && $GITHUB_EVENT_NAME == "pull_request" ]]; then
-            echo "Cannot build a new container within a PR. Please re-run this action after $head_image:$tag_name is built."
-            exit 1
+          else
+            build_image=true
           fi
 
           echo "build_image=$build_image" >> $GITHUB_OUTPUT
           echo "tag_name=$tag_name" >> $GITHUB_OUTPUT
           echo "image_name=$image_name" >> $GITHUB_OUTPUT
           echo "container_name=${{ env.REGISTRY }}/$image_name:$tag_name" >> $GITHUB_OUTPUT
+
       - name: Set up Docker Buildx
+        if: steps.read-repo-info.outputs.build_image == 'true'
         uses: docker/setup-buildx-action@v3
+
+      - name: Build container
         if: steps.read-repo-info.outputs.build_image == 'true'
-      - name: Build and Push
         uses: docker/build-push-action@v6
-        if: steps.read-repo-info.outputs.build_image == 'true'
         with:
           context: .
           file: Dockerfile
-          tags: ${{ env.REGISTRY }}/${{ steps.read-repo-info.outputs.image_name }}:${{ steps.read-repo-info.outputs.tag_name }}
-          cache-from: ${{ env.REGISTRY }}/${{ steps.read-repo-info.outputs.image_name }}:cache-${{ steps.read-repo-info.outputs.tag_name }}
-          cache-to: ${{ env.REGISTRY }}/${{ steps.read-repo-info.outputs.image_name }}:cache-${{ steps.read-repo-info.outputs.tag_name }}
           push: true
-    outputs:
-      tag_name: ${{ steps.read-repo-info.outputs.tag_name }}
-      image_name: ${{ steps.read-repo-info.outputs.image_name }}
-      container_name: ${{ steps.read-repo-info.outputs.container_name }}
+          tags: ${{ steps.read-repo-info.outputs.container_name }}
 
+  build-firmware:
+    name: Build ZBDongle-E Firmware
 
-  list-manifests:
-     runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - id: set-matrix
-        run: |
-          echo 'matrix=["manifests/sonoff/zbdonglee_openthread_rcp.yaml"]' >> $GITHUB_OUTPUT
+    needs:
+      - build-container
 
-  build-firmwares:
-    name: Firmware builder
-    needs: [list-manifests, build-container]
     runs-on: ubuntu-latest
+
     container:
       image: ${{ needs.build-container.outputs.container_name }}
       options: --user root
-    strategy:
-      matrix:
-        manifest: ${{ fromJson(needs.list-manifests.outputs.matrix) }}
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Install SDK extensions
+        shell: bash
         run: |
-          # XXX: slc-cli does not actually work when the extensions aren't in the SDK!
           for sdk in /*_sdk_*; do
             slc signature trust --sdk "$sdk"
 
-            ln -s $PWD/gecko_sdk_extensions "$sdk"/extension
+            ln -sf "$PWD/gecko_sdk_extensions" "$sdk"/extension
 
             for ext in "$sdk"/extension/*/; do
               slc signature trust --sdk "$sdk" --extension-path "$ext"
@@ -133,28 +86,24 @@ jobs:
           done
 
       - name: Build firmware
-        id: build-firmware
+        shell: bash
         run: |
-          # Fix `fatal: detected dubious ownership in repository at`
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-          # Pass all SDKs as consecutive `--sdk ...` arguments
           sdk_args=""
-          for sdk_dir in /*_sdk*; do
-            sdk_args="$sdk_args --sdk $sdk_dir"
+          for sdk in /*_sdk*; do
+            sdk_args="$sdk_args --sdk $sdk"
           done
 
-          # Pass all toolchains as consecutive `--toolchain ...` arguments
           toolchain_args=""
-          for toolchain_dir in /opt/*arm-none-eabi*; do
-            toolchain_args="$toolchain_args --toolchain $toolchain_dir"
+          for tc in /opt/*arm-none-eabi*; do
+            toolchain_args="$toolchain_args --toolchain $tc"
           done
 
-          # Build it
           python3 tools/build_project.py \
             $sdk_args \
             $toolchain_args \
-            --manifest "${{ matrix.manifest }}" \
+            --manifest manifests/sonoff/zbdonglee_openthread_rcp.yaml \
             --build-dir build \
             --build-system makefile \
             --output-dir outputs \
@@ -162,40 +111,9 @@ jobs:
             --output hex \
             --output out
 
-          # Get the basename of the GBL in `outputs`
-          output_basename=$(basename -- $(basename -- $(ls -1 outputs/*.gbl | head -n 1)) .gbl)
-          echo "output_basename=$output_basename" >> $GITHUB_OUTPUT
-
-      - name: Install node within container (act)
-        if: ${{ env.ACT }}
-        run: |
-          curl -fsSL https://deb.nodesource.com/nsolid_setup_deb.sh | bash -s 20
-          apt-get install -y nodejs
-
-      - name: Upload artifact
+      - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-build-${{ steps.build-firmware.outputs.output_basename }}
+          name: zbdonglee-openthread
           path: outputs/*
           compression-level: 9
-          if-no-files-found: error
-
-  release-assets:
-    name: Upload release assets
-    needs: [build-firmwares]
-    if: github.event_name == 'release'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download all workflow artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-          pattern: firmware-build-*
-
-      - name: Upload artifacts
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/*.gbl
