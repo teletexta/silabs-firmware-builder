@@ -1,14 +1,8 @@
 name: Build firmwares
 
 on:
-  pull_request:
-    paths-ignore:
-      - '.gitignore'
-      - 'README.md'
-  push:
-    paths-ignore:
-      - '.gitignore'
-      - 'README.md'
+  workflow_dispatch:
+
   release:
     types:
       - published
@@ -104,15 +98,13 @@ jobs:
 
 
   list-manifests:
-    name: List firmware manifests
-    runs-on: ubuntu-latest
+     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
       - id: set-matrix
         run: |
-          echo "matrix=$(find manifests -type f \( -name "*.yaml" -o -name "*.yml" \) -not -path "*/nabucasa/*" -print | sort | jq -R -s -c 'split("\n")[:-1]')" >> $GITHUB_OUTPUT
+          echo 'matrix=["manifests/sonoff/zbdonglee_openthread_rcp.yaml"]' >> $GITHUB_OUTPUT
 
   build-firmwares:
     name: Firmware builder
