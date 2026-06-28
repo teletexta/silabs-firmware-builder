@@ -11,8 +11,13 @@ RUN \
        git-lfs \
        jq \
        yq \
+       libdbus-1-3 \
        libgl1 \
        libglib2.0-0 \
+       libnss3 \
+       libx11-6 \
+       libxcb1 \
+       libxext6 \
        locales \
        make \
        openjdk-21-jre-headless \
@@ -21,7 +26,8 @@ RUN \
        python3 \
        python3-ruamel.yaml \
        unzip \
-       xz-utils
+       xz-utils \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN \
     locale-gen en_US.UTF-8 \
